@@ -94,8 +94,8 @@ def parse_subtitles(aligner, subtitles, start_time, end_time, content, wav_path,
 
     # Write subtitles from @srt_sections to the final srt file
     for section in srt_sections:
-        section_start_time = start_time + section[0].start
-        section_end_time = start_time + section[-1].end
+        section_start_time = start_time + section[0].start_time
+        section_end_time = start_time + section[-1].end_time
         section_content = " ".join([word.text for word in section])
         subtitles.append(srt.Subtitle(
             index=len(subtitles) + 1,
