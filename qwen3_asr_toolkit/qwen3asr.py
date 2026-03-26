@@ -24,6 +24,8 @@ language_code_mapping = {
     "es": "Spanish"
 }
 
+language_name_set = set(language_code_mapping.values())
+
 
 class QwenASR:
     def __init__(self, model: str = "qwen3-asr-flash"):
@@ -166,6 +168,40 @@ class QwenASR:
             time.sleep(random.uniform(*API_RETRY_SLEEP))
         raise Exception(f"{wav_url} task failed!\n{response}")
 
+class QwenASRAligner:
+    def __init__(self):
+        try:
+            import torch
+            from qwen_asr import Qwen3ForcedAligner
+        except ImportError as e:
+            raise ImportError(
+                "QwenASRAligner requires latest qwen_asr and torch. Run: pip install -U qwen_asr torch"
+            ) from e
+        
+        
+        self.aligner = Qwen3ForcedAligner.from_pretrained(
+            "Qwen/Qwen3-ForcedAligner-0.6B",
+            dtype=torch.bfloat16,
+            device_map="cuda:0"
+        )
+    
+    def align(self, wav_path: str, text: str, lang: str = "en"):
+        if lang in language_code_mapping:
+            language = language_code_mapping[lang]
+        elif lang in language_name_set:
+            language = lang
+        else:
+            language = "English"
+
+        result = self.aligner.align(
+            audio = wav_path,
+            text = text,
+            language = language
+        )
+        
+        return result
+    
+    
 
 if __name__ == "__main__":
     qwen_asr = QwenASR(model="qwen3-asr-flash")

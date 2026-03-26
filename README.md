@@ -79,6 +79,12 @@ Simply run the following command in your terminal. This will install the package
 pip install qwen3-asr-toolkit
 ```
 
+If you plan to use forced-alignment subtitle generation, install or upgrade the aligner dependency explicitly:
+
+```bash
+pip install -U qwen_asr
+```
+
 #### Option 2: Install from Source
 
 If you want to install the latest development version or contribute to the project, you can install from the source code.

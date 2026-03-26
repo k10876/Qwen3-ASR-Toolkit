@@ -9,3 +9,5 @@ wheel
 requests
 urllib
 srt
+qwen_asr
+torch

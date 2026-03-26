@@ -10,7 +10,7 @@ from datetime import timedelta
 from collections import Counter
 from urllib.parse import urlparse
 from silero_vad import load_silero_vad
-from qwen3_asr_toolkit.qwen3asr import QwenASR
+from qwen3_asr_toolkit.qwen3asr import QwenASR, QwenASRAligner
 from qwen3_asr_toolkit.audio_tools import load_audio, process_vad, save_audio_file, WAV_SAMPLE_RATE
 
 
@@ -28,6 +28,61 @@ def parse_args():
     parser.add_argument("--silence", '-s', action="store_true", help="Reduce the output info on the terminal")
     return parser.parse_args()
 
+def parse_subtitles(aligner, subtitles, start_time, end_time, content, wav_path, language):
+    result = aligner.align(
+        wav_path,
+        content,
+        lang=language,
+    )
+    
+    """
+    Format of Output:
+    item: text, start, end
+    """
+    word_alignments = result[0].items()
+    max_chars = 100
+    
+    current_chars = 0
+    srt_sections = []
+    current_section_words = []
+
+    for item in word_alignments:
+        word_text = item.text
+        if current_chars + len(word_text) + 1 > max_chars and current_section_words:
+            # Store the completed section
+            srt_sections.append(current_section_words)
+            current_section_words = [item]
+            current_chars = len(word_text)
+        else:
+            current_section_words.append(item)
+            current_chars += len(word_text) + 1
+
+    if current_section_words:
+        srt_sections.append(current_section_words)
+
+    # Fall back to segment-level subtitles if forced alignment returns no words.
+    if not srt_sections:
+        subtitles.append(srt.Subtitle(
+            index=len(subtitles) + 1,
+            start=timedelta(seconds=start_time),
+            end=timedelta(seconds=end_time),
+            content=content
+        ))
+        return
+
+    # Write subtitles from @srt_sections to the final srt file
+    for section in srt_sections:
+        section_start_time = start_time + section[0].start
+        section_end_time = start_time + section[-1].end
+        section_content = " ".join([word.text for word in section])
+        subtitles.append(srt.Subtitle(
+            index=len(subtitles) + 1,
+            start=timedelta(seconds=section_start_time),
+            end=timedelta(seconds=section_end_time),
+            content=section_content
+        ))
+    
+    
 
 def main():
     args = parse_args()
@@ -97,7 +152,7 @@ def main():
         for future in concurrent.futures.as_completed(future_dict):
             idx = future_dict[future]
             language, recog_text = future.result()
-            results.append((idx, recog_text))
+            results.append((idx, language, recog_text))
             languages.append(language)
             if not silence:
                 pbar.update(1)
@@ -106,7 +161,7 @@ def main():
 
     # Sort and splice in the original order
     results.sort(key=lambda x: x[0])
-    full_text = " ".join(text for _, text in results)
+    full_text = " ".join(text for _, _, text in results)
     language = Counter(languages).most_common(1)[0][0]
 
     if not silence:
@@ -131,16 +186,28 @@ def main():
     # Save subtitles to local SRT file
     if args.save_srt:
         subtitles = []
+        aligner = QwenASRAligner()
+
         for idx, result in enumerate(results):
             start_time = wav_list[idx][0] / WAV_SAMPLE_RATE
             end_time = wav_list[idx][1] / WAV_SAMPLE_RATE
-            content = result[1]
-            subtitles.append(srt.Subtitle(
-                index=idx,
-                start=timedelta(seconds=start_time),
-                end=timedelta(seconds=end_time),
-                content=content
-            ))
+            seg_language = result[1]
+            content = result[2]
+            
+            parse_subtitles(
+                aligner = aligner,
+                subtitles = subtitles,
+                start_time = start_time,
+                end_time = end_time,
+                content = content,
+                wav_path = wav_path_list[idx],
+                language = seg_language,
+            )
+
+        # Guarantee SRT indices are strictly sequential.
+        for i, sub in enumerate(subtitles, start=1):
+            sub.index = i
+
         final_srt_content = srt.compose(subtitles)
         with open(os.path.splitext(save_file)[0] + ".srt", 'w') as f:
             f.write(final_srt_content)

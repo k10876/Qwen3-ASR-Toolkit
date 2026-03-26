@@ -13,7 +13,9 @@ setup(
         'pydub',
         'tqdm',
         'numpy',
-        'srt'
+        'srt',
+        'qwen_asr',
+        'torch'
     ],
     entry_points={
         'console_scripts': [
