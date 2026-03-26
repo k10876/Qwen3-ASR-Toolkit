@@ -61,7 +61,7 @@ def parse_subtitles(aligner, subtitles, start_time, end_time, content, wav_path,
     Format of Output:
     item: text, start, end
     """
-    word_alignments = result[0].items()
+    word_alignments = result[0].items
     max_chars = 100
     
     current_chars = 0
