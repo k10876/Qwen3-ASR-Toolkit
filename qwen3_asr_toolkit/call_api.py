@@ -1,17 +1,39 @@
 import argparse
 import os
+import shutil
 import srt
 import requests
 import dashscope
 import concurrent.futures
 
+from dataclasses import dataclass
 from tqdm import tqdm
 from datetime import timedelta
 from collections import Counter
+from typing import List, Optional
 from urllib.parse import urlparse
 from silero_vad import load_silero_vad
 from qwen3_asr_toolkit.qwen3asr import QwenASR, QwenASRAligner
 from qwen3_asr_toolkit.audio_tools import load_audio, process_vad, save_audio_file, WAV_SAMPLE_RATE
+
+
+@dataclass
+class SegmentResult:
+    index: int
+    start_time: float
+    end_time: float
+    language: str
+    text: str
+
+
+@dataclass
+class TranscriptionResult:
+    input_file: str
+    language: str
+    text: str
+    segments: List[SegmentResult]
+    text_output_path: Optional[str] = None
+    srt_output_path: Optional[str] = None
 
 
 def parse_args():
@@ -84,18 +106,7 @@ def parse_subtitles(aligner, subtitles, start_time, end_time, content, wav_path,
     
     
 
-def main():
-    args = parse_args()
-    input_file = args.input_file
-    context = args.context
-    dashscope_api_key = args.dashscope_api_key
-    num_threads = args.num_threads
-    vad_segment_threshold = args.vad_segment_threshold
-    tmp_dir = args.tmp_dir
-    save_srt = args.save_srt
-    silence = args.silence
-
-    # check if input file exists
+def _validate_input_exists(input_file: str):
     if input_file.startswith(("http://", "https://")):
         try:
             response = requests.head(input_file, allow_redirects=True, timeout=5)
@@ -106,12 +117,42 @@ def main():
     elif not os.path.exists(input_file):
         raise FileNotFoundError(f"Input file \"{input_file}\" does not exist!")
 
+
+def _default_text_output_path(input_file: str) -> str:
+    if os.path.exists(input_file):
+        return os.path.splitext(input_file)[0] + ".txt"
+
+    url_path = os.path.splitext(urlparse(input_file).path)[0].split('/')[-1]
+    base_name = url_path if url_path else "transcription"
+    return base_name + ".txt"
+
+
+def transcribe(
+    input_file: str,
+    context: str = "",
+    dashscope_api_key: Optional[str] = None,
+    num_threads: int = 4,
+    vad_segment_threshold: int = 120,
+    tmp_dir: str = os.path.join(os.path.expanduser("~"), "qwen3-asr-cache"),
+    save_srt: bool = False,
+    silence: bool = False,
+    model: str = "qwen3-asr-flash",
+    save_text: bool = True,
+    cleanup_tmp: bool = True,
+) -> TranscriptionResult:
+    if num_threads <= 0:
+        raise ValueError("num_threads must be > 0")
+    if vad_segment_threshold <= 0:
+        raise ValueError("vad_segment_threshold must be > 0")
+
+    _validate_input_exists(input_file)
+
     if dashscope_api_key:
         dashscope.api_key = dashscope_api_key
     else:
         assert "DASHSCOPE_API_KEY" in os.environ, f"Please set DASHSCOPE_API_KEY as an environment variable, or specify it with '-key' argument"
 
-    qwen3asr = QwenASR(model="qwen3-asr-flash")
+    qwen3asr = QwenASR(model=model)
 
     wav = load_audio(input_file)
     if not silence:
@@ -147,6 +188,7 @@ def main():
             executor.submit(qwen3asr.asr, wav_path, context): idx
             for idx, wav_path in enumerate(wav_path_list)
         }
+        pbar = None
         if not silence:
             pbar = tqdm(total=len(future_dict), desc="Calling Qwen3-ASR-Flash API")
         for future in concurrent.futures.as_completed(future_dict):
@@ -154,9 +196,9 @@ def main():
             language, recog_text = future.result()
             results.append((idx, language, recog_text))
             languages.append(language)
-            if not silence:
+            if pbar is not None:
                 pbar.update(1)
-        if not silence:
+        if pbar is not None:
             pbar.close()
 
     # Sort and splice in the original order
@@ -164,27 +206,35 @@ def main():
     full_text = " ".join(text for _, _, text in results)
     language = Counter(languages).most_common(1)[0][0]
 
+    segment_results = []
+    for idx, seg_language, seg_text in results:
+        segment_results.append(SegmentResult(
+            index=idx,
+            start_time=wav_list[idx][0] / WAV_SAMPLE_RATE,
+            end_time=wav_list[idx][1] / WAV_SAMPLE_RATE,
+            language=seg_language,
+            text=seg_text,
+        ))
+
     if not silence:
         print(f"Detected Language: {language}")
         print(f"Full Transcription: {full_text}")
 
-    # Delete tmp save dir
-    os.system(f"rm -rf {save_dir}")
+    text_output_path = None
+    if save_text:
+        text_output_path = _default_text_output_path(input_file)
+        with open(text_output_path, 'w') as f:
+            f.write(language + '\n')
+            f.write(full_text + '\n')
+        if not silence:
+            print(f"Full transcription of \"{input_file}\" from Qwen3-ASR-Flash API saved to \"{text_output_path}\"!")
 
-    # Save full text to local file
-    if os.path.exists(input_file):
-        save_file = os.path.splitext(input_file)[0] + ".txt"
-    else:
-        save_file = os.path.splitext(urlparse(input_file).path)[0].split('/')[-1] + '.txt'
+    srt_output_path = None
+    if save_srt:
+        if not save_text:
+            text_output_path = _default_text_output_path(input_file)
+        assert text_output_path is not None
 
-    with open(save_file, 'w') as f:
-        f.write(language + '\n')
-        f.write(full_text + '\n')
-
-    print(f"Full transcription of \"{input_file}\" from Qwen3-ASR-Flash API saved to \"{save_file}\"!")
-
-    # Save subtitles to local SRT file
-    if args.save_srt:
         subtitles = []
         aligner = QwenASRAligner()
 
@@ -209,9 +259,37 @@ def main():
             sub.index = i
 
         final_srt_content = srt.compose(subtitles)
-        with open(os.path.splitext(save_file)[0] + ".srt", 'w') as f:
+        srt_output_path = os.path.splitext(text_output_path)[0] + ".srt"
+        with open(srt_output_path, 'w') as f:
             f.write(final_srt_content)
-    print(f"SRT subtitles of \"{input_file}\" from Qwen3-ASR-Flash API saved to \"{save_dir}\"!")
+        if not silence:
+            print(f"SRT subtitles of \"{input_file}\" from Qwen3-ASR-Flash API saved to \"{srt_output_path}\"!")
+
+    if cleanup_tmp:
+        shutil.rmtree(save_dir, ignore_errors=True)
+
+    return TranscriptionResult(
+        input_file=input_file,
+        language=language,
+        text=full_text,
+        segments=segment_results,
+        text_output_path=text_output_path,
+        srt_output_path=srt_output_path,
+    )
+
+
+def main():
+    args = parse_args()
+    transcribe(
+        input_file=args.input_file,
+        context=args.context,
+        dashscope_api_key=args.dashscope_api_key,
+        num_threads=args.num_threads,
+        vad_segment_threshold=args.vad_segment_threshold,
+        tmp_dir=args.tmp_dir,
+        save_srt=args.save_srt,
+        silence=args.silence,
+    )
 
 
 if __name__ == '__main__':

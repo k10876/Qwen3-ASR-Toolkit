@@ -104,6 +104,32 @@ If you want to install the latest development version or contribute to the proje
 
 Once installed, you can use the `qwen3-asr` command directly from your terminal. By default, the tool will print progress information.
 
+### Python API
+
+You can also call the toolkit directly in Python after `pip install qwen3-asr-toolkit`:
+
+```python
+from qwen3_asr_toolkit import transcribe
+
+result = transcribe(
+    input_file="/path/to/audio_or_video.mp4",
+    context="Qwen-ASR, DashScope",
+    num_threads=4,
+    vad_segment_threshold=120,
+    save_srt=True,
+)
+
+print(result.language)
+print(result.text)
+print(result.text_output_path)  # e.g. /path/to/audio_or_video.txt
+print(result.srt_output_path)   # e.g. /path/to/audio_or_video.srt
+
+for segment in result.segments:
+    print(segment.index, segment.start_time, segment.end_time, segment.text)
+```
+
+The `transcribe(...)` API accepts the same core parameters as the CLI (`input_file`, `context`, `dashscope_api_key`, `num_threads`, `vad_segment_threshold`, `tmp_dir`, `save_srt`, `silence`) and returns a structured `TranscriptionResult` object.
+
 ### Command
 
 ```bash
